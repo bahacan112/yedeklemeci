@@ -1,53 +1,73 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { verifyUser, getBackupConfig, createBackupHistory, cleanupOldBackups, updateBackupHistory } from '@/lib/database'
-import { sendBackupNotification } from '@/lib/email'
+import { NextRequest, NextResponse } from "next/server";
+import {
+  verifyUser,
+  getBackupConfig,
+  createBackupHistory,
+  cleanupOldBackups,
+  updateBackupHistory,
+} from "@/lib/database";
+import { sendBackupNotification } from "@/lib/email";
 
 export async function POST(request: NextRequest) {
   try {
-    const { username, password, configName } = await request.json()
+    const { username, password, configName } = await request.json();
 
     if (!username || !password || !configName) {
-      return NextResponse.json({
-        success: false,
-        error: 'Username, password and configName are required',
-        timestamp: new Date().toISOString()
-      }, { status: 400 })
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Username, password and configName are required",
+          timestamp: new Date().toISOString(),
+        },
+        { status: 400 }
+      );
     }
 
     // Authenticate user
-    const user = await verifyUser(username, password)
+    const user = await verifyUser(username, password);
     if (!user) {
-      return NextResponse.json({
-        success: false,
-        error: 'Invalid credentials',
-        timestamp: new Date().toISOString()
-      }, { status: 401 })
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Invalid credentials",
+          timestamp: new Date().toISOString(),
+        },
+        { status: 401 }
+      );
     }
 
-    console.log(`[CRON-CONFIG] Starting backup for config: ${configName} by user: ${username}`)
+    console.log(
+      `[CRON-CONFIG] Starting backup for config: ${configName} by user: ${username}`
+    );
 
     // Find the specific configuration by name
-    const { getBackupConfigsByUser } = await import('@/lib/database')
-    const configs = await getBackupConfigsByUser(user.id)
-    const config = configs.find(c => c.name === configName)
-    
+    const { getBackupConfigsByUser } = await import("@/lib/database");
+    const configs = await getBackupConfigsByUser(user.id);
+    const config = configs.find((c) => c.name === configName);
+
     if (!config) {
-      return NextResponse.json({
-        success: false,
-        error: `Configuration '${configName}' not found`,
-        timestamp: new Date().toISOString()
-      }, { status: 404 })
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Configuration '${configName}' not found`,
+          timestamp: new Date().toISOString(),
+        },
+        { status: 404 }
+      );
     }
 
     if (!config.sources || config.sources.length === 0) {
-      return NextResponse.json({
-        success: false,
-        error: `Configuration '${configName}' has no source folders`,
-        timestamp: new Date().toISOString()
-      }, { status: 400 })
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Configuration '${configName}' has no source folders`,
+          timestamp: new Date().toISOString(),
+        },
+        { status: 400 }
+      );
     }
 
-    const startTime = Date.now()
+    const startTime = Date.now();
     let result = {
       configId: config.id,
       configName: config.name,
@@ -57,17 +77,19 @@ export async function POST(request: NextRequest) {
       fileName: null as string | null,
       fileSize: null as number | null,
       deletedOldBackups: 0,
-      processingTime: 0
-    }
+      processingTime: 0,
+    };
 
     try {
-      console.log(`[CRON-CONFIG] Processing config: ${config.name} (ID: ${config.id})`)
+      console.log(
+        `[CRON-CONFIG] Processing config: ${config.name} (ID: ${config.id})`
+      );
 
       // Generate filename with timestamp
-      const now = new Date()
-      const dateStr = now.toISOString().split('T')[0] // YYYY-MM-DD
-      const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-') // HH-MM-SS
-      const fileName = `backup_${config.name}_${dateStr}_${timeStr}.zip`
+      const now = new Date();
+      const dateStr = now.toISOString().split("T")[0]; // YYYY-MM-DD
+      const timeStr = now.toTimeString().split(" ")[0].replace(/:/g, "-"); // HH-MM-SS
+      const fileName = `backup_${config.name}_${dateStr}_${timeStr}.zip`;
 
       // Create backup history entry
       const historyEntry = createBackupHistory({
@@ -77,289 +99,422 @@ export async function POST(request: NextRequest) {
         file_size: 0,
         onedrive_uploaded: false,
         googledrive_uploaded: false,
-        status: 'processing'
-      })
+        status: "processing",
+      });
 
       try {
         // Get access tokens
-        const microsoftToken = await getMicrosoftAccessToken()
-        const googleToken = await getGoogleAccessToken()
+        const microsoftToken = await getMicrosoftAccessToken();
+        const googleToken = await getGoogleAccessToken();
 
         // Compress multiple folders
-        const sourcePaths = config.sources.map(source => source.source_path)
-        const compressedFile = await compressMultipleFolders(microsoftToken, sourcePaths)
-        
+        const sourcePaths = config.sources.map((source) => source.source_path);
+        const compressedFile = await compressMultipleFolders(
+          microsoftToken,
+          sourcePaths
+        );
+
         // Upload to OneDrive
-        await uploadToOneDrive(microsoftToken, compressedFile, config.onedrive_path, fileName)
-        
+        await uploadToOneDrive(
+          microsoftToken,
+          compressedFile,
+          config.onedrive_path,
+          fileName
+        );
+
         // Upload to Google Drive
-        await uploadToGoogleDrive(googleToken, compressedFile, config.googledrive_path, fileName)
+        await uploadToGoogleDrive(
+          googleToken,
+          compressedFile,
+          config.googledrive_path,
+          fileName
+        );
 
         // Update history entry
         updateBackupHistory(historyEntry.id, {
           file_size: compressedFile.length,
           onedrive_uploaded: true,
           googledrive_uploaded: true,
-          status: 'completed'
-        })
+          status: "completed",
+        });
 
         // Clean up old backups
-        const oldBackups = cleanupOldBackups(config.id, config.retention_days)
-        
+        const oldBackups = cleanupOldBackups(config.id, config.retention_days);
+
         // Delete old backup files from cloud storage
         for (const oldBackup of oldBackups) {
           try {
-            await deleteFromOneDrive(microsoftToken, config.onedrive_path, oldBackup.file_name)
-            await deleteFromGoogleDrive(googleToken, oldBackup.file_name)
+            await deleteFromOneDrive(
+              microsoftToken,
+              config.onedrive_path,
+              oldBackup.file_name
+            );
+            await deleteFromGoogleDrive(googleToken, oldBackup.file_name);
           } catch (deleteError) {
-            console.error(`[CRON-CONFIG] Error deleting old backup: ${oldBackup.file_name}`, deleteError)
+            console.error(
+              `[CRON-CONFIG] Error deleting old backup: ${oldBackup.file_name}`,
+              deleteError
+            );
           }
         }
 
-        result.success = true
-        result.fileName = fileName
-        result.fileSize = compressedFile.length
-        result.deletedOldBackups = oldBackups.length
+        result.success = true;
+        result.fileName = fileName;
+        result.fileSize = compressedFile.length;
+        result.deletedOldBackups = oldBackups.length;
 
-        console.log(`[CRON-CONFIG] Successfully completed backup for config: ${config.name}`)
+        console.log(
+          `[CRON-CONFIG] Successfully completed backup for config: ${config.name}`
+        );
 
         // Send success notification
-        await sendBackupNotification(user.id, 'backup_success', {
+        await sendBackupNotification(user.id, "backup_success", {
           configName: config.name,
           fileName: result.fileName,
           fileSize: result.fileSize,
           sourceFolders: config.sources?.length || 0,
           processingTime: result.processingTime,
-          deletedOldBackups: result.deletedOldBackups
-        })
-
+          deletedOldBackups: result.deletedOldBackups,
+        });
       } catch (backupError) {
         // Update history entry with error
         updateBackupHistory(historyEntry.id, {
-          status: 'failed',
-          error_message: backupError instanceof Error ? backupError.message : 'Unknown error'
-        })
-        throw backupError
+          status: "failed",
+          error_message:
+            backupError instanceof Error
+              ? backupError.message
+              : "Unknown error",
+        });
+        throw backupError;
       }
-
     } catch (error) {
-      result.error = error instanceof Error ? error.message : 'Unknown error'
-      console.error(`[CRON-CONFIG] Error processing config ${config.name}:`, error)
+      result.error = error instanceof Error ? error.message : "Unknown error";
+      console.error(
+        `[CRON-CONFIG] Error processing config ${config.name}:`,
+        error
+      );
 
       // Send error notification
-      await sendBackupNotification(user.id, 'backup_error', {
+      await sendBackupNotification(user.id, "backup_error", {
         configName: config.name,
         error: result.error,
-        processingTime: result.processingTime
-      })
+        processingTime: result.processingTime,
+      });
     }
 
-    result.processingTime = Date.now() - startTime
+    result.processingTime = Date.now() - startTime;
 
-    console.log(`[CRON-CONFIG] Backup process completed for config: ${configName}. Success: ${result.success}`)
+    console.log(
+      `[CRON-CONFIG] Backup process completed for config: ${configName}. Success: ${result.success}`
+    );
 
     return NextResponse.json({
       success: result.success,
-      message: result.success 
+      message: result.success
         ? `Configuration '${configName}' backup completed successfully`
         : `Configuration '${configName}' backup failed: ${result.error}`,
       user: username,
       timestamp: new Date().toISOString(),
-      result
-    })
-
+      result,
+    });
   } catch (error) {
-    console.error('[CRON-CONFIG] Backup process failed:', error)
-    return NextResponse.json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-      timestamp: new Date().toISOString()
-    }, { status: 500 })
+    console.error("[CRON-CONFIG] Backup process failed:", error);
+    return NextResponse.json(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+        timestamp: new Date().toISOString(),
+      },
+      { status: 500 }
+    );
   }
+}
+
+// Fixed: Recursive folder compression with proper folder structure
+async function compressMultipleFolders(
+  accessToken: string,
+  sourcePaths: string[]
+): Promise<Buffer> {
+  const JSZip = require("jszip");
+  const zip = new JSZip();
+
+  // Get target user email and user ID
+  const targetUserEmail = process.env.TARGET_USER_EMAIL;
+  if (!targetUserEmail) {
+    throw new Error("TARGET_USER_EMAIL not configured");
+  }
+
+  const userId = await getUserIdFromEmail(accessToken, targetUserEmail);
+
+  for (const folderPath of sourcePaths) {
+    try {
+      console.log(`[CRON-CONFIG] Processing folder: ${folderPath}`);
+      const folderName = folderPath.split("/").pop() || "folder";
+
+      // Create a folder in the ZIP for each source folder
+      const folderInZip = zip.folder(folderName);
+
+      // Recursively process the folder
+      await processFolder(accessToken, userId, folderPath, folderInZip);
+    } catch (folderError) {
+      console.warn(
+        `[CRON-CONFIG] Klasör işleme hatası: ${folderPath}`,
+        folderError
+      );
+    }
+  }
+
+  return await zip.generateAsync({ type: "nodebuffer" });
+}
+
+// New recursive function to process folders
+async function processFolder(
+  accessToken: string,
+  userId: string,
+  folderPath: string,
+  zipFolder: any
+): Promise<void> {
+  try {
+    const graphUrl = `https://graph.microsoft.com/v1.0/users/${userId}/drive/root:${folderPath}:/children`;
+
+    const response = await fetch(graphUrl, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      console.warn(`[CRON-CONFIG] Klasör erişim hatası: ${folderPath}`);
+      return;
+    }
+
+    const folderData = await response.json();
+
+    for (const item of folderData.value) {
+      if (item.file) {
+        // It's a file - download and add to zip
+        try {
+          console.log(`[CRON-CONFIG] Downloading file: ${item.name}`);
+          const fileResponse = await fetch(
+            item["@microsoft.graph.downloadUrl"]
+          );
+          const fileBuffer = await fileResponse.arrayBuffer();
+          zipFolder?.file(item.name, fileBuffer);
+        } catch (fileError) {
+          console.warn(
+            `[CRON-CONFIG] Dosya indirme hatası: ${item.name}`,
+            fileError
+          );
+        }
+      } else if (item.folder) {
+        // It's a folder - create subfolder in zip and process recursively
+        console.log(`[CRON-CONFIG] Processing subfolder: ${item.name}`);
+        const subFolderInZip = zipFolder?.folder(item.name);
+        const subFolderPath = `${folderPath}/${item.name}`;
+
+        // Recursive call for subfolder
+        await processFolder(accessToken, userId, subFolderPath, subFolderInZip);
+      }
+    }
+  } catch (error) {
+    console.warn(`[CRON-CONFIG] Klasör işleme hatası: ${folderPath}`, error);
+  }
+}
+
+// Helper function to get user ID from email (add this if not exists)
+async function getUserIdFromEmail(
+  accessToken: string,
+  email: string
+): Promise<string> {
+  const userUrl = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
+    email
+  )}`;
+
+  const response = await fetch(userUrl, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `User not found: ${email}. Error: ${response.status} - ${errorText}`
+    );
+  }
+
+  const userData = await response.json();
+  return userData.id;
 }
 
 // Helper functions (same as in backup/route.ts)
 async function getMicrosoftAccessToken(): Promise<string> {
-  const tokenUrl = `https://login.microsoftonline.com/${process.env.MICROSOFT_TENANT_ID}/oauth2/v2.0/token`
-  
+  const tokenUrl = `https://login.microsoftonline.com/${process.env.MICROSOFT_TENANT_ID}/oauth2/v2.0/token`;
+
   const response = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       client_id: process.env.MICROSOFT_CLIENT_ID!,
       client_secret: process.env.MICROSOFT_CLIENT_SECRET!,
-      scope: 'https://graph.microsoft.com/.default',
-      grant_type: 'client_credentials'
-    })
-  })
+      scope: "https://graph.microsoft.com/.default",
+      grant_type: "client_credentials",
+    }),
+  });
 
   if (!response.ok) {
-    throw new Error('Microsoft token alınamadı')
+    throw new Error("Microsoft token alınamadı");
   }
 
-  const data = await response.json()
-  return data.access_token
+  const data = await response.json();
+  return data.access_token;
 }
 
 async function getGoogleAccessToken(): Promise<string> {
-  const response = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       client_id: process.env.GOOGLE_CLIENT_ID!,
       client_secret: process.env.GOOGLE_CLIENT_SECRET!,
       refresh_token: process.env.GOOGLE_REFRESH_TOKEN!,
-      grant_type: 'refresh_token'
-    })
-  })
+      grant_type: "refresh_token",
+    }),
+  });
 
   if (!response.ok) {
-    throw new Error('Google token alınamadı')
+    throw new Error("Google token alınamadı");
   }
 
-  const data = await response.json()
-  return data.access_token
+  const data = await response.json();
+  return data.access_token;
 }
 
-async function compressMultipleFolders(accessToken: string, sourcePaths: string[]): Promise<Buffer> {
-  const JSZip = require('jszip')
-  const zip = new JSZip()
+async function uploadToOneDrive(
+  accessToken: string,
+  fileBuffer: Buffer,
+  targetPath: string,
+  fileName: string
+): Promise<void> {
+  const uploadUrl = `https://graph.microsoft.com/v1.0/me/drive/root:${targetPath}/${fileName}:/content`;
 
-  for (const folderPath of sourcePaths) {
-    try {
-      const graphUrl = `https://graph.microsoft.com/v1.0/me/drive/root:${folderPath}:/children`
-      
-      const response = await fetch(graphUrl, {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      })
-
-      if (!response.ok) {
-        console.warn(`[CRON-CONFIG] Klasör erişim hatası: ${folderPath}`)
-        continue
-      }
-
-      const folderData = await response.json()
-      const folderName = folderPath.split('/').pop() || 'folder'
-      
-      // Create a folder in the ZIP for each source folder
-      const folderInZip = zip.folder(folderName)
-
-      for (const item of folderData.value) {
-        if (item.file) {
-          try {
-            const fileResponse = await fetch(item['@microsoft.graph.downloadUrl'])
-            const fileBuffer = await fileResponse.arrayBuffer()
-            folderInZip?.file(item.name, fileBuffer)
-          } catch (fileError) {
-            console.warn(`[CRON-CONFIG] Dosya indirme hatası: ${item.name}`)
-          }
-        }
-      }
-    } catch (folderError) {
-      console.warn(`[CRON-CONFIG] Klasör işleme hatası: ${folderPath}`, folderError)
-    }
-  }
-
-  return await zip.generateAsync({ type: 'nodebuffer' })
-}
-
-async function uploadToOneDrive(accessToken: string, fileBuffer: Buffer, targetPath: string, fileName: string): Promise<void> {
-  const uploadUrl = `https://graph.microsoft.com/v1.0/me/drive/root:${targetPath}/${fileName}:/content`
-  
   const response = await fetch(uploadUrl, {
-    method: 'PUT',
+    method: "PUT",
     headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/zip'
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/zip",
     },
-    body: fileBuffer
-  })
+    body: fileBuffer,
+  });
 
   if (!response.ok) {
-    throw new Error(`OneDrive upload failed: ${response.statusText}`)
+    throw new Error(`OneDrive upload failed: ${response.statusText}`);
   }
 }
 
-async function uploadToGoogleDrive(accessToken: string, fileBuffer: Buffer, targetPath: string, fileName: string): Promise<void> {
-  const folderId = await getGoogleDriveFolderId(accessToken, targetPath)
-  
+async function uploadToGoogleDrive(
+  accessToken: string,
+  fileBuffer: Buffer,
+  targetPath: string,
+  fileName: string
+): Promise<void> {
+  const folderId = await getGoogleDriveFolderId(accessToken, targetPath);
+
   const metadata = {
     name: fileName,
-    parents: [folderId]
-  }
+    parents: [folderId],
+  };
 
-  const form = new FormData()
-  form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }))
-  form.append('file', new Blob([fileBuffer], { type: 'application/zip' }))
+  const form = new FormData();
+  form.append(
+    "metadata",
+    new Blob([JSON.stringify(metadata)], { type: "application/json" })
+  );
+  form.append("file", new Blob([fileBuffer], { type: "application/zip" }));
 
-  const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${accessToken}` },
-    body: form
-  })
+  const response = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: form,
+    }
+  );
 
   if (!response.ok) {
-    throw new Error(`Google Drive upload failed: ${response.statusText}`)
+    throw new Error(`Google Drive upload failed: ${response.statusText}`);
   }
 }
 
-async function deleteFromOneDrive(accessToken: string, folderPath: string, fileName: string): Promise<void> {
-  const deleteUrl = `https://graph.microsoft.com/v1.0/me/drive/root:${folderPath}/${fileName}`
-  
+async function deleteFromOneDrive(
+  accessToken: string,
+  folderPath: string,
+  fileName: string
+): Promise<void> {
+  const deleteUrl = `https://graph.microsoft.com/v1.0/me/drive/root:${folderPath}/${fileName}`;
+
   await fetch(deleteUrl, {
-    method: 'DELETE',
-    headers: { 'Authorization': `Bearer ${accessToken}` }
-  })
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
 }
 
-async function deleteFromGoogleDrive(accessToken: string, fileName: string): Promise<void> {
-  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=name='${fileName}'`
-  
-  const response = await fetch(searchUrl, {
-    headers: { 'Authorization': `Bearer ${accessToken}` }
-  })
+async function deleteFromGoogleDrive(
+  accessToken: string,
+  fileName: string
+): Promise<void> {
+  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=name='${fileName}'`;
 
-  const data = await response.json()
-  
+  const response = await fetch(searchUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  const data = await response.json();
+
   if (data.files && data.files.length > 0) {
-    const fileId = data.files[0].id
+    const fileId = data.files[0].id;
     await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${accessToken}` }
-    })
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
   }
 }
 
-async function getGoogleDriveFolderId(accessToken: string, folderPath: string): Promise<string> {
-  const folderName = folderPath.split('/').pop()
-  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=name='${folderName}' and mimeType='application/vnd.google-apps.folder'`
-  
-  const response = await fetch(searchUrl, {
-    headers: { 'Authorization': `Bearer ${accessToken}` }
-  })
+async function getGoogleDriveFolderId(
+  accessToken: string,
+  folderPath: string
+): Promise<string> {
+  const folderName = folderPath.split("/").pop();
+  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=name='${folderName}' and mimeType='application/vnd.google-apps.folder'`;
 
-  const data = await response.json()
-  
+  const response = await fetch(searchUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  const data = await response.json();
+
   if (data.files && data.files.length > 0) {
-    return data.files[0].id
+    return data.files[0].id;
   }
 
   // Create folder if it doesn't exist
-  const createResponse = await fetch('https://www.googleapis.com/drive/v3/files', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      name: folderName,
-      mimeType: 'application/vnd.google-apps.folder'
-    })
-  })
+  const createResponse = await fetch(
+    "https://www.googleapis.com/drive/v3/files",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: folderName,
+        mimeType: "application/vnd.google-apps.folder",
+      }),
+    }
+  );
 
-  const newFolder = await createResponse.json()
-  return newFolder.id
+  const newFolder = await createResponse.json();
+  return newFolder.id;
 }
